@@ -1,0 +1,670 @@
+          turnRL = turnRL0
+              + (.67 * turn - turnRL0) * parabolicStep(t, nextFootSwitchT, 0.0);
+        }
+        // 5.3.6R Foot height
+      }
+      foothR = varfootHeight; // 0 - 0.011
+      foothL = 0;
+    }
+    // 5.4 Special conditions when priming the walk
+    if (walkState == STARTING)
+    {
+      turnRL = 0;   // don't turn on start of rocking - may relax this in future
+      foothL /= 3.5;  // reduce max lift due to short duration - may need to adjust this later
+      foothR /= 3.5;                                  // "
+      leftR = leftL = 0;      // don't try to step left on starting and stopping
+      forwardL = forwardR = 0;                 // don't move forward or backward
+    }
+    // 5.5 "natural" arm swing while walking/kicking to counterbalance foot swing
+    shoulderPitchR = -forwardR * 6;  //10;                     // forwardR is in meters, 10 is an arbitrary scale factor to match previous walk
+    shoulderPitchL = -forwardL * 6;                        //10;
+  }
+
+  else if (walkOption == STEP)
+  {  // Turn step
+    float footHeight = TURN_STEP_HEIGHT * parabolicReturn(t / nextFootSwitchT);
+    if (active.foot != ActionCommand::Body::LEFT)
+    {     // if the support foot is right while turning
+      foothL = footHeight;                            // lift left swing foot
+      foothR = 0;                                   // do not lift support foot;
+      rock = TURN_LEAN * parabolicReturn(t / nextFootSwitchT);
+    }
+    else
+    {                               // if the support foot is left while turning
+      foothR = footHeight;                            // lift right swing foot
+      foothL = 0;                                   // do not lift support foot;
+      rock = -TURN_LEAN * parabolicReturn(t / nextFootSwitchT);
+    }
+
+    // Interpolate turn step over turnT with dead period to avoid dragging against the ground
+    turnRL = turnAngle * TURN_SCALE * parabolicStep(t, nextFootSwitchT, 0.15);
+    // Once the turn step has pretty much finished, readjust the kick direction
+    if (t >= nextFootSwitchT - dt)
+    {
+      if (active.kickDirection >= TURN_THRESHOLD)
+      {
+        active.kickDirection -= (turnAngle * 2);
+      }
+      else if (active.kickDirection <= -TURN_THRESHOLD)
+      {
+        active.kickDirection += (turnAngle * 2);
+      }
+      // tjark
+      t = 0;
+      turnRL = 0;
+    }
+    lastTurn = turnRL;
+  }
+
+  else
+  {  // When walk option is not WALK or KICK
+    foothL = foothR = 0;
+  }
+
+  // 6. Changing Support Foot. Note bodyModel.isLeftPhase means left foot is swing foot.
+  //    t>0.75*T tries to avoid bounce, especially when side-stepping
+  //    lastZMPL*ZMPL<0.0 indicates that support foot has changed
+  //    t>3*T tires to get out of "suck" situations
+  //bodyModel.updateZMPL();
+#ifdef TARGET_ROBOT
+  if ((t > 0.75 * T and bodyModel.ZMPL * bodyModel.lastZMPL < 0) or t > 3 * T)  // Carrol : ZMP过零
+#else
+  if ((t > 0.75 * T and bodyModel.ZMPL * bodyModel.lastZMPL < 0) or t > T)  // Carrol : ZMP过零
+#endif
+  {
+    supportFoothasChanged = true;
+  }
+  if (supportFoothasChanged)
+  {
+    lastIsLeftPhase = bodyModel.isLeftPhase;
+#ifdef TARGET_ROBOT
+    bodyModel.setIsLeftPhase(bodyModel.ZMPL < 0);  // set isLeft phase in body model for kinematics etc
+#else
+    bodyModel.setIsLeftPhase(!bodyModel.isLeftPhase);  // set isLeft phase in body model for kinematics etc
+#endif
+  }
+  if (supportFoothasChanged and walkOption == WALK)
+  {
+    supportFoothasChanged = false;                      //reset
+
+    // 6.1 Recover previous "left" swing angle
+    if (bodyModel.isLeftPhase)
+      swingAngle = leftL;
+    else
+      swingAngle = leftR;
+
+    // 6.2 Decide on timing of next walk step phase
+    if (walkState == NOT_WALKING)
+    {                       // Start the walk
+      nextFootSwitchT = T;
+      walkState = STARTING;
+    }
+    else if (walkState == STARTING)
+    {
+      nextFootSwitchT = T;
+      walkState = WALKING;
+    }
+    else if (walkState == WALKING)
+    {
+      nextFootSwitchT = T;
+      walkState = WALKING;  // continue walking until interrupted by a command to stop (or kick?)
+    }
+    else if (walkState == STOPPING)
+    {
+      nextFootSwitchT = T;
+      walkState = NOT_WALKING;
+    }
+    else
+      cout << "Should never get here: walkState error" << endl;
+    // 6.3 reset step phase time
+    t = 0;                                             // reset step phase timer
+    // 6.4 backup values
+    turnRL0 = turnRL;                   // store turn value for use in next step
+    forwardR0 = forwardR;                               // sagittal right foot
+    forwardL0 = forwardL;                               // sagittal left foot
+    // 6.5 Other stuff on support foot change
+    // none at the moment
+  }  // end of changing support foot
+
+  // 7. Sagittal Balance
+  filteredGyroY = 0.8 * filteredGyroY
+      + 0.2 * sensors.sensors[InertialSensor_GyrY];
+  balanceAdjustment = filteredGyroY / 25;  // adjust ankle tilt in proportion to filtered gryoY
+  if (walkOption == READY)
+    balanceAdjustment = 0;        // to stop swaying while not walking
+
+  // 7.5 Coronal Balance
+  filteredGyroX = 0.8 * filteredGyroX
+      + 0.2 * sensors.sensors[InertialSensor_GyrX];
+  coronalBalanceAdjustment = filteredGyroX / 25;  // adjust ankle roll in proportion to filtered gryoX
+
+  // 8. Odometry update for localisation
+  lastOdometry = odometry;
+  odometry = updateOdometry(bodyModel.isLeftPhase);
+  // @yongqi: correct odometry
+  odometry.forward *= 1.1f;
+  odometry.left *= 1.05f;
+  odometry.turn *= 1.1f;
+//  odometry.forward = odometry.forward
+//      + motionOdometry.updateOdometry(sensors, updateOdometry(bodyModel.isLeftPhase)).forward;
+//  odometry.left = odometry.left
+//      + motionOdometry.updateOdometry(sensors, updateOdometry(bodyModel.isLeftPhase)).left;
+//  odometry.turn = odometry.turn + motionOdometry.updateOdometry(sensors, updateOdometry(bodyModel.isLeftPhase)).turn;
+
+  // Diagnostic Printouts - commented out for production code
+
+  // 9. Work out joint angles from walk variables above
+
+  // 9.1 Left foot closed form inverse kinematics
+  float leghL = hiph - foothL - ankle;  // vertical height between ankle and hip in meters
+  float legX0L = leghL / cos(leftL);  // leg extension (eliminating knee) when forwardL = 0
+  float legXL = sqrt(
+      legX0L * legX0L + (forwardL + comOffset) * (forwardL + comOffset));  //leg extension at forwardL
+  float beta1L = acos(
+      (thighL * thighL + legXL * legXL - tibia * tibia) / (2.0f * thighL * legXL));  // acute angle at hip in thigh-tibia triangle
+  float beta2L = acos(
+      (tibia * tibia + legXL * legXL - thighL * thighL) / (2.0f * tibia * legXL));  // acute angle at ankle in thigh-tibia triangle
+  float tempL = legX0L / legXL;
+  if (tempL > 1.0f)
+    tempL = 1.0f;  // sin ratio to calculate leg extension pitch. If > 1 due to numerical error round down.
+  float deltaL = asin(tempL);                             // leg extension angle
+  float dirL = 1.0f;
+  if ((forwardL + comOffset) > 0.0f)
+    dirL = -1.0f;  // signum of position of foot
+  float HpL = beta1L + dirL * (M_PI / 2.0f - deltaL);  // Hip pitch is sum of leg-extension + hip acute angle above
+  float ApL = beta2L + dirL * (deltaL - M_PI / 2.0f);  // Ankle pitch is a similar calculation for the ankle joint
+  float KpL = HpL + ApL;  // to keep torso upright with both feet on the ground, the knee pitch is always the sum of the hip pitch and the ankle pitch.
+  // 9.2 right foot closed form inverse kinematics (comments as above but for right leg)
+  float leghR = hiph - foothR - ankle;
+  float legX0R = leghR / cos(leftR);
+  float legXR = sqrt(
+      legX0R * legX0R + (forwardR + comOffset) * (forwardR + comOffset));
+  float dirR = 1.0f;
+  if ((forwardR + comOffset) > 0.0f)
+    dirR = -1.0f;
+  float beta1R = acos(
+      (thighR * thighR + legXR * legXR - tibia * tibia) / (2.0f * thighR * legXR));
+  float beta2R = acos(
+      (tibia * tibia + legXR * legXR - thighR * thighR) / (2.0f * tibia * legXR));
+  float tempR = legX0R / legXR;
+  if (tempR > 1.0f)
+    tempR = 1.0f;
+  float deltaR = asin(tempR);
+  float HpR = beta1R + dirR * (M_PI / 2.0f - deltaR);
+  float ApR = beta2R + dirR * (deltaR - M_PI / 2.0f);
+  float KpR = HpR + ApR;
+
+  // 9.3 Sert hip and ankle values
+  float HrL = -leftL;
+  float HrR = -leftR;
+  float ArL = -HrL;
+  float ArR = -HrR;
+  if (walkOption == STEP)
+  {
+    HrL += rock;
+    HrR += rock;
+    ArL -= rock;
+    ArR -= rock;
+  }
+
+  // 9.4 Adjust HpL, HrL, ApL, ArL LEFT based on Hyp turn to keep ankle in situ
+  // Turning
+  XYZ_Coord tL = mf2b(z, -HpL, HrL, KpL, -ApL, ArL, z, z, z, true);
+  XYZ_Coord sL;
+  float Hyp = -turnRL;
+  for (int i = 0; i < 3; i++)
+  {
+    sL = mf2b(Hyp, -HpL, HrL, KpL, -ApL, ArL, z, z, z, true);
+    XYZ_Coord e((tL.x - sL.x), (tL.y - sL.y), (tL.z - sL.z));
+    Hpr hpr = hipAngles(Hyp, -HpL, HrL, KpL, -ApL, ArL, z, z, z, e, true);
+    HpL -= hpr.Hp;
+    HrL += hpr.Hr;
+  }
+  // ApL and ArL to make sure LEFT foot is parallel to ground
+  XYZ_Coord up = mf2b(Hyp, -HpL, HrL, KpL, -ApL, ArL, 1.0f, 0.0f, 0.0f, true);
+  XYZ_Coord ur = mf2b(Hyp, -HpL, HrL, KpL, -ApL, ArL, 0.0f, 1.0f, 0.0f, true);
+  ApL = ApL + asin(sL.z - up.z);
+  ArL = ArL + asin(sL.z - ur.z);
+
+  // 9.5 Adjust HpR, HrR, ApR, ArR (RIGHT) based on Hyp turn to keep ankle in situ
+  // Map to LEFT - we reuse the left foot IK because of symmetry right foot
+  float Hr = -HrR;
+  float Ar = -ArR;
+  // Target foot origin in body coords
+  XYZ_Coord t = mf2b(z, -HpR, Hr, KpR, -ApR, Ar, z, z, z, false);
+  XYZ_Coord s;
+  Hyp = -turnRL;
+  for (int i = 0; i < 3; i++)
+  {
+    s = mf2b(Hyp, -HpR, Hr, KpR, -ApR, Ar, z, z, z, false);
+    XYZ_Coord e((t.x - s.x), (t.y - s.y), (t.z - s.z));
+    Hpr hpr = hipAngles(Hyp, -HpR, Hr, KpR, -ApR, Ar, z, z, z, e, false);
+    HpR -= hpr.Hp;
+    Hr += hpr.Hr;
+  }
+  // 9.6 Ap and Ar to make sure foot is parallel to ground
+  XYZ_Coord u1 = mf2b(Hyp, -HpR, Hr, KpR, -ApR, Ar, 1.0f, 0.0f, 0.0f, false);
+  XYZ_Coord u2 = mf2b(Hyp, -HpR, Hr, KpR, -ApR, Ar, 0.0f, 1.0f, 0.0f, false);
+  ApR = ApR + asin(s.z - u1.z);
+  Ar = Ar + asin(s.z - u2.z);
+  // map back from left foot to right foot
+  HrR = -Hr;
+  ArR = -Ar;
+
+  // 10. Set joint values and stiffness
+  JointValues j = sensors.joints;
+  for (uint8_t i = 0; i < Joints::numOfJoints; ++i)
+    j.stiffnesses[i] = stiffness;
+
+  // 10.1 Arms
+  j.angles[Joints::lShoulderPitch] = DEG2RAD(90) + shoulderPitchL;
+  j.angles[Joints::lShoulderRoll] = DEG2RAD(7) + shoulderRollL;
+  j.angles[Joints::lElbowYaw] = DEG2RAD(0);  //DEG2RAD(-90); //swing bent arms
+  j.angles[Joints::lElbowRoll] = DEG2RAD(0);  //DEG2RAD(-30)+shoulderPitchL;  //swing bent arms
+  j.angles[Joints::lWristYaw] = DEG2RAD(0);
+  j.angles[Joints::rShoulderPitch] = DEG2RAD(90) + shoulderPitchR * (1.f + (float)(active.forward)/(1000*MAX_FORWARD)); // yongqi: *1.5 to fix the problem that robot can't walk straight
+  j.angles[Joints::rShoulderRoll] = DEG2RAD(-7) - shoulderRollR;
+  j.angles[Joints::rElbowYaw] = DEG2RAD(0);  //DEG2RAD(90);  //swing bent arms
+  j.angles[Joints::rElbowRoll] = DEG2RAD(0);  //DEG2RAD(30)-shoulderPitchR; //swing bent arms
+  j.angles[Joints::rWristYaw] = DEG2RAD(0);
+
+  float armStiffness = 0.1f;
+  j.stiffnesses[Joints::lShoulderPitch] = armStiffness;
+  j.stiffnesses[Joints::lShoulderRoll] = armStiffness;
+  j.stiffnesses[Joints::lElbowYaw] = armStiffness;
+  j.stiffnesses[Joints::lElbowRoll] = armStiffness;
+  j.stiffnesses[Joints::lWristYaw] = armStiffness;
+  j.stiffnesses[Joints::rShoulderPitch] = armStiffness;
+  j.stiffnesses[Joints::rShoulderRoll] = armStiffness;
+  j.stiffnesses[Joints::rElbowYaw] = armStiffness;
+  j.stiffnesses[Joints::rElbowRoll] = armStiffness;
+  j.stiffnesses[Joints::rWristYaw] = armStiffness;
+
+  // 10.2 Turn
+  j.angles[Joints::lHipYawPitch] = -turnRL;
+
+  // 10.3 Sagittal Joints
+  j.angles[Joints::lHipPitch] = -HpL;
+  j.angles[Joints::rHipPitch] = -HpR;
+  j.angles[Joints::lKneePitch] = KpL;
+  j.angles[Joints::rKneePitch] = KpR;
+  // Only activate balance control if foot is on the ground
+  j.angles[Joints::lAnklePitch] = -ApL;
+  j.angles[Joints::rAnklePitch] = -ApR;
+#ifdef TARGET_ROBOT
+  if (walkOption == WALK and nextFootSwitchT > 0)
+  {
+    if (bodyModel.isLeftPhase)
+      j.angles[Joints::rAnklePitch] += balanceAdjustment;
+    else
+      j.angles[Joints::lAnklePitch] += balanceAdjustment;
+  }
+  else
+  {
+    j.angles[Joints::rAnklePitch] += balanceAdjustment;
+    j.angles[Joints::lAnklePitch] += balanceAdjustment;
+  }
+#endif
+
+  // 10.4 Coronal Joints
+  j.angles[Joints::lHipRoll] = HrL;
+  j.angles[Joints::rHipRoll] = HrR;
+  j.angles[Joints::lAnkleRoll] = ArL;
+  j.angles[Joints::rAnkleRoll] = ArR;
+
+//  j.angles[Joints::lHipYawPitch] += -3_deg;
+
+
+
+  /*
+   //quick check if position went out of joint space
+   for(int i = 0; i < cJoints::numOfJoints; i++){
+   checkNaN(j.angles[i],  cJoints::fliteJointNames[i]);
+   }
+   */
+  return j;
+}
+
+void WalkingEngine::generateOutput(WalkingEngineOutput& walkingEngineOutput)
+{
+  walkingEngineOutput.speed.translation = Vector2f(forward, left);
+  walkingEngineOutput.speed.rotation = lastTurn;
+  Pose3f footLeft = theRobotModel.limbs[Limbs::footLeft].translated(0.f, 0.f, -theRobotDimensions.footHeight);
+  Pose3f footRight = theRobotModel.limbs[Limbs::footRight].translated(0.f, 0.f, -theRobotDimensions.footHeight);
+  Vector3f odometryOrigin = (footLeft.translation + footRight.translation) * 0.5f;
+  if(lastOdometryOrigin.z() != 0.f)
+  {
+    Pose3f& footSupport = bodyModel.isLeftPhase ? footLeft : footRight;
+    Pose3f& lastFootSupport = bodyModel.isLeftPhase ? lastFootLeft : lastFootRight;
+    Pose3f odometryOffset3DinP = (Pose3f(-odometryOrigin).conc(footSupport).conc(lastFootSupport.inverse()).conc(lastOdometryOrigin)).inverse();
+    Pose3f odometryOffset3D = Pose3f(theTorsoMatrix).conc(odometryOffset3DinP).conc(theTorsoMatrix.inverse());
+    odometryOffset.rotation = odometryOffset3D.rotation.getZAngle();
+    odometryOffset.translation.x() = -odometryOffset3D.translation.x();
+    odometryOffset.translation.y() = -odometryOffset3D.translation.y();
+  }
+  else
+    odometryOffset = Pose2f();
+  lastFootLeft = footLeft;
+  lastFootRight = footRight;
+  lastOdometryOrigin = odometryOrigin;
+  walkingEngineOutput.odometryOffset = odometryOffset;
+  
+  walkingEngineOutput.upcomingOdometryOffset = Pose2f(odometry.turn, odometry.forward, odometry.left);
+  static Vector2f odometer(0,0);
+  odometer.x() += odometry.forward;
+  odometer.y() += odometry.left;
+  
+  walkingEngineOutput.upcomingOdometryOffsetValid = true;
+  walkingEngineOutput.isLeavingPossible = active.actionType != ActionCommand::Body::WALK;
+  walkingEngineOutput.positionInWalkCycle = 0.f;
+  walkingEngineOutput.standing = active.actionType != ActionCommand::Body::WALK;
+  walkingEngineOutput.instability = 0.f;
+  walkingEngineOutput.executedWalk = theMotionRequest.walkRequest;
+  walkingEngineOutput.executedWalk.kickType = WalkRequest::none; //kickPlayer.isActive() ? kickPlayer.getType() : WalkRequest::none;
+  (JointRequest&)walkingEngineOutput = jointRequest;
+  WalkingEngineOutput::PhaseType phase;
+  if (active.actionType == ActionCommand::Body::STAND)
+    phase = WalkingEngineOutput::standPhase;
+  else if (bodyModel.isLeftPhase)
+    phase = WalkingEngineOutput::rightSupportPhase;
+  else
+    phase = WalkingEngineOutput::leftSupportPhase;
+  walkingEngineOutput.walkPhase = phase;
+}
+
+void WalkingEngine::generateDummyOutput(WalkingEngineOutput& walkingEngineOutput)
+{
+  walkingEngineOutput.standing = false;
+  walkingEngineOutput.speed = Pose2f();
+  walkingEngineOutput.odometryOffset = Pose2f();
+  walkingEngineOutput.upcomingOdometryOffset = Pose2f();
+  walkingEngineOutput.upcomingOdometryOffsetValid = true;
+  walkingEngineOutput.isLeavingPossible = true;
+  walkingEngineOutput.positionInWalkCycle = 0.f;
+  walkingEngineOutput.instability = 0.f;
+  walkingEngineOutput.executedWalk = WalkRequest();
+  walkingEngineOutput.walkPhase = WalkingEngineOutput::PhaseType::standPhase;
+  // leaving joint data untouched
+}
+
+
+
+Odometry WalkingEngine::updateOdometry(bool isLeftSwingFoot)
+{
+  // Work out incremental forward, left, and turn values for next time step
+  float height = hiph - ankle;
+  float turnOdo = -(turnRL - prevTurn);
+  float leftOdo = (height * tan(leftR) - prevLeftR);
+  float forwardOdo = (forwardR - prevForwardR);
+  if (!isLeftSwingFoot)
+  {
+    turnOdo *= -1;
+    leftOdo = (height * tan(leftL) - prevLeftL);
+    forwardOdo = (forwardL - prevForwardL);
+  }
+  forwardOdo *= MM_PER_M;
+  leftOdo *= MM_PER_M;
+  //Calibrate odometry to match the actual speed
+  forwardOdo *= 1;
+  leftOdo *= 1.23;
+  turnOdo *= -.58;
+
+  // backup odometry values
+  prevTurn = turnRL;
+  prevLeftL = height * tan(leftL);
+  prevLeftR = height * tan(leftR);
+  prevForwardL = forwardL;
+  prevForwardR = forwardR;
+  return Odometry(forwardOdo, leftOdo, turnOdo);
+}
+
+float WalkingEngine::leftAngle()
+{
+  float left_at_t = left*parabolicStep(t,nextFootSwitchT,0.0);
+  float height = hiph-ankle;
+  return atan(left_at_t/height);
+}
+
+// functions out of class
+float WalkingEngine::linearStep(float time, float period)
+{
+  if (time <= 0)
+    return 0;
+  if (time >= period)
+    return 1;
+  return time / period;
+}
+
+float WalkingEngine::parabolicReturn(float f)
+{         //normalised [0,1] up and down
+  double x = 0;
+  double y = 0;
+  if (f < 0.25f)
+  {
+    y = 8 * f * f;
+  }
+  if (f >= 0.25f && f < 0.5f)
+  {
+    x = 0.5f - f;
+    y = 8 * x * x;
+    y = 1.0f - y;
+  }
+  if (f >= 0.5f && f < 0.75f)
+  {
+    x = f - 0.5f;
+    y = 8 * x * x;
+    y = 1.0f - y;
+  }
+  if (f >= 0.75f && f <= 1.0f)
+  {
+    x = 1.0f - f;
+    y = 8 * x * x;
+  }
+  return y;
+}
+
+float WalkingEngine::parabolicStep(float time, float period, float deadTimeFraction)
+{  //normalised [0,1] step up
+  float deadTime = period * deadTimeFraction / 2;
+  if (time < deadTime + dt / 2)
+    return 0;
+  if (time > period - deadTime - dt / 2)
+    return 1;
+  float timeFraction = (time - deadTime) / (period - 2 * deadTime);
+  if (time < period / 2)
+    return 2.0 * timeFraction * timeFraction;
+  return 4 * timeFraction - 2 * timeFraction * timeFraction - 1;
+}
+
+float WalkingEngine::interpolateSmooth(float start, float end, float tCurrent, float tEnd) {
+   return start + (end - start) * (1 + cos(M_PI * tCurrent / tEnd - M_PI)) / 2;
+}
+
+// 支撑脚6+1个关节角+摆动脚坐标位置------DH链
+XYZ_Coord WalkingEngine::mf2b(float Hyp, float Hp, float Hr,
+                                  float Kp,  float Ap, float Ar,
+                                  float xf, float yf, float zf, bool left) {
+// MFOOT2BODY Transform coords from foot to body.
+// This code originates from 2010 using symbolic equations in Matlab to perform the coordinate transforms - see team report (BH)
+// In future this approach to IK for the Nao should be reworked in closed form, significantly reducing the size of the code the
+// the computational complexity (BH)
+   XYZ_Coord result;
+   float pi = M_PI;
+   float tibia        = this->tibia*1000;
+   float thigh        = left ? this->thighL*1000 : this->thighR*1000;
+   float k  = sqrt(2.0);
+   float c1 = cos(Ap);
+   float c2 = cos(Hr + pi/4.0);
+   float c3 = cos(Hyp - pi/2.0);
+   float c4 = cos(Hp);
+   float c5 = cos(Kp);
+   float c6 = cos(Ar - pi/2.0);
+   float s1 = sin(Kp);
+   float s2 = sin(Hp);
+   float s3 = sin(Hyp - 1.0/2.0*pi);
+   float s4 = sin(Hr + 1.0/4.0*pi);
+   float s5 = sin(Ap);
+   float s6 = sin(Ar - 1.0/2.0*pi);
+   result.x = thigh*(s2*s3 - c2*c3*c4) + tibia*(s1*(c4*s3 + c2*c3*s2) +
+       c5*(s2*s3 - c2*c3*c4)) - yf*(c6*(c1*(s1*(c4*s3 + c2*c3*s2) +
+       c5*(s2*s3 - c2*c3*c4)) - s5*(s1*(s2*s3 - c2*c3*c4) - c5*(c4*s3 +
+       c2*c3*s2))) + c3*s4*s6) + zf*(s6*(c1*(s1*(c4*s3 + c2*c3*s2) +
+       c5*(s2*s3 - c2*c3*c4)) - s5*(s1*(s2*s3 - c2*c3*c4) - c5*(c4*s3 +
+       c2*c3*s2))) - c3*c6*s4) + xf*(c1*(s1*(s2*s3 - c2*c3*c4) -
+       c5*(c4*s3 + c2*c3*s2)) + s5*(s1*(c4*s3 + c2*c3*s2) +
+       c5*(s2*s3 - c2*c3*c4)));
+   result.y = xf*(c1*(c5*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) -
+       (c3*c4*k)/2.0f) + s1*(c4*((k*s4)/2.0f + (c2*k*s3)/2.0f) +
+       (c3*k*s2)/2.0f)) + s5*(c5*(c4*((k*s4)/2.0f + (c2*k*s3)/2.0f) +
+       (c3*k*s2)/2.0f) - s1*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) -
+       (c3*c4*k)/2.0f))) + tibia*(c5*(c4*((k*s4)/2.0f +
+       (c2*k*s3)/2.0f) + (c3*k*s2)/2.0f) - s1*(s2*((k*s4)/2.0f +
+       (c2*k*s3)/2.0f) - (c3*c4*k)/2.0f)) + thigh*(c4*((k*s4)/2.0f +
+       (c2*k*s3)/2.0f) + (c3*k*s2)/2.0f) - yf*(s6*((c2*k)/2.0f -
+       (k*s3*s4)/2.0f) + c6*(c1*(c5*(c4*((k*s4)/2.0f + (c2*k*s3)/2.0f) +
+       (c3*k*s2)/2.0f) - s1*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) -
+       (c3*c4*k)/2.0f)) - s5*(c5*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) -
+       (c3*c4*k)/2.0f) + s1*(c4*((k*s4)/2.0f + (c2*k*s3)/2.0f) +
+       (c3*k*s2)/2.0f)))) - zf*(c6*((c2*k)/2.0f - (k*s3*s4)/2.0f) -
+       s6*(c1*(c5*(c4*((k*s4)/2.0f + (c2*k*s3)/2.0f) + (c3*k*s2)/2.0f) -
+       s1*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) - (c3*c4*k)/2.0f)) -
+       s5*(c5*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) - (c3*c4*k)/2.0f) +
+       s1*(c4*((k*s4)/2.0f + (c2*k*s3)/2.0f) + (c3*k*s2)/2.0f))));
+   result.z = yf*(s6*((c2*k)/2.0f + (k*s3*s4)/2.0f) +
+       c6*(c1*(c5*(c4*((k*s4)/2.0f - (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f) -
+       s1*(s2*((k*s4)/2.0f - (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f)) -
+       s5*(c5*(s2*((k*s4)/2.0f - (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f) +
+       s1*(c4*((k*s4)/2.0f - (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f)))) -
+       tibia*(c5*(c4*((k*s4)/2.0f - (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f) -
+       s1*(s2*((k*s4)/2.0f - (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f)) -
+       thigh*(c4*((k*s4)/2.0f - (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f) -
+       xf*(c1*(c5*(s2*((k*s4)/2.0f - (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f) +
+       s1*(c4*((k*s4)/2.0f - (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f)) +
+       s5*(c5*(c4*((k*s4)/2.0f - (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f) -
+       s1*(s2*((k*s4)/2.0f - (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f))) +
+       zf*(c6*((c2*k)/2.0f + (k*s3*s4)/2.0f) - s6*(c1*(c5*(c4*((k*s4)/2.0f -
+       (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f) - s1*(s2*((k*s4)/2.0f -
+       (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f)) - s5*(c5*(s2*((k*s4)/2.0f -
+       (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f) + s1*(c4*((k*s4)/2.0f -
+       (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f))));
+   return result;
+}
+
+WalkingEngine::Hpr WalkingEngine::hipAngles(float Hyp, float Hp,
+                                  float Hr, float Kp,  float Ap, float Ar,
+                                  float xf, float yf, float zf, XYZ_Coord e, bool left) {
+// Code from 2010 to perform interative Inverse Kinematics.
+// Symbolic equations generated in Matlab - see 2010 team report for details and reference
+   Hpr result;
+   float pi = M_PI;
+   float tibia        = this->tibia*1000;
+   float thigh        = left ? this->thighL*1000 : this->thighR*1000;
+   float k  = sqrt(2.0);
+   float c1 = cos(Ap);
+   float c2 = cos(Hr + pi/4.0);
+   float c3 = cos(Hyp - pi/2.0);
+   float c4 = cos(Hp);
+   float c5 = cos(Kp);
+   float c6 = cos(Ar - pi/2.0);
+   float s1 = sin(Kp);
+   float s2 = sin(Hp);
+   float s3 = sin(Hyp - 1.0/2.0*pi);
+   float s4 = sin(Hr + 1.0/4.0*pi);
+   float s5 = sin(Ap);
+   float s6 = sin(Ar - 1.0/2.0*pi);
+   float j11 = thigh*(c4*s3 + c2*c3*s2) - tibia*(s1*(s2*s3 -
+       c2*c3*c4) - c5*(c4*s3 + c2*c3*s2)) + xf*(c1*(s1*(c4*s3 +
+       c2*c3*s2) + c5*(s2*s3 - c2*c3*c4)) - s5*(s1*(s2*s3 -
+       c2*c3*c4) - c5*(c4*s3 + c2*c3*s2))) + c6*yf*(c1*(s1*(s2*s3 -
+       c2*c3*c4) - c5*(c4*s3 + c2*c3*s2)) + s5*(s1*(c4*s3 +
+       c2*c3*s2) + c5*(s2*s3 - c2*c3*c4))) - s6*zf*(c1*(s1*(s2*s3 -
+       c2*c3*c4) - c5*(c4*s3 + c2*c3*s2)) + s5*(s1*(c4*s3 +
+       c2*c3*s2) + c5*(s2*s3 - c2*c3*c4)));
+   float j12 = yf*(c6*(c1*(c3*s1*s2*s4 - c3*c4*c5*s4) +
+       s5*(c3*c4*s1*s4 + c3*c5*s2*s4)) - c2*c3*s6) -
+       tibia*(c3*s1*s2*s4 - c3*c4*c5*s4) - zf*(s6*(c1*(c3*s1*s2*s4 -
+       c3*c4*c5*s4) + s5*(c3*c4*s1*s4 + c3*c5*s2*s4)) + c2*c3*c6) +
+       xf*(c1*(c3*c4*s1*s4 + c3*c5*s2*s4) - s5*(c3*s1*s2*s4 -
+       c3*c4*c5*s4)) + c3*c4*s4*thigh;
+   float j21 = xf*(c1*(c5*(c4*((k*s4)/2.0f + (c2*k*s3)/2.0f) +
+       (c3*k*s2)/2.0f) - s1*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) -
+       (c3*c4*k)/2.0f)) -
+       s5*(c5*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) - (c3*c4*k)/2.0f) +
+       s1*(c4*((k*s4)/2.0f + (c2*k*s3)/2.0f) + (c3*k*s2)/2.0f))) -
+       tibia*(c5*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) - (c3*c4*k)/2.0f) +
+       s1*(c4*((k*s4)/2.0f + (c2*k*s3)/2.0f) + (c3*k*s2)/2.0f)) -
+       thigh*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) - (c3*c4*k)/2.0f) +
+       c6*yf*(c1*(c5*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) - (c3*c4*k)/2.0f) +
+       s1*(c4*((k*s4)/2.0f + (c2*k*s3)/2.0f) + (c3*k*s2)/2.0f)) +
+       s5*(c5*(c4*((k*s4)/2.0f + (c2*k*s3)/2.0f) + (c3*k*s2)/2.0f) -
+       s1*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) - (c3*c4*k)/2.0f))) -
+       s6*zf*(c1*(c5*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) - (c3*c4*k)/2.0f) +
+       s1*(c4*((k*s4)/2.0f + (c2*k*s3)/2.0f) + (c3*k*s2)/2.0f)) +
+       s5*(c5*(c4*((k*s4)/2.0f + (c2*k*s3)/2.0f) + (c3*k*s2)/2.0f) -
+       s1*(s2*((k*s4)/2.0f + (c2*k*s3)/2.0f) - (c3*c4*k)/2.0f)));
+   float j22 = tibia*(c4*c5*((c2*k)/2.0f - (k*s3*s4)/2.0f) -
+       s1*s2*((c2*k)/2.0f - (k*s3*s4)/2.0f)) + xf*(c1*(c4*s1*((c2*k)/2.0f -
+       (k*s3*s4)/2.0f) + c5*s2*((c2*k)/2.0f - (k*s3*s4)/2.0f)) +
+       s5*(c4*c5*((c2*k)/2.0f - (k*s3*s4)/2.0f) - s1*s2*((c2*k)/2.0f -
+       (k*s3*s4)/2.0f))) + yf*(s6*((k*s4)/2.0f + (c2*k*s3)/2.0f) -
+       c6*(c1*(c4*c5*((c2*k)/2.0f - (k*s3*s4)/2.0f) - s1*s2*((c2*k)/2.0f -
+       (k*s3*s4)/2.0f)) - s5*(c4*s1*((c2*k)/2.0f - (k*s3*s4)/2.0f) +
+       c5*s2*((c2*k)/2.0f - (k*s3*s4)/2.0f)))) + zf*(c6*((k*s4)/2.0f +
+       (c2*k*s3)/2.0f) + s6*(c1*(c4*c5*((c2*k)/2.0f - (k*s3*s4)/2.0f) -
+       s1*s2*((c2*k)/2.0f - (k*s3*s4)/2.0f)) - s5*(c4*s1*((c2*k)/2.0f -
+       (k*s3*s4)/2.0f) + c5*s2*((c2*k)/2.0f - (k*s3*s4)/2.0f)))) +
+       c4*thigh*((c2*k)/2.0f - (k*s3*s4)/2.0f);
+   float j31 = tibia*(c5*(s2*((k*s4)/2.0f - (c2*k*s3)/2.0f) +
+       (c3*c4*k)/2.0f) + s1*(c4*((k*s4)/2.0f - (c2*k*s3)/2.0f) -
+       (c3*k*s2)/2.0f)) -
+       xf*(c1*(c5*(c4*((k*s4)/2.0f - (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f) -
+       s1*(s2*((k*s4)/2.0f - (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f)) -
+       s5*(c5*(s2*((k*s4)/2.0f - (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f) +
+       s1*(c4*((k*s4)/2.0f - (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f))) +
+       thigh*(s2*((k*s4)/2.0f - (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f) -
+       c6*yf*(c1*(c5*(s2*((k*s4)/2.0f - (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f) +
+       s1*(c4*((k*s4)/2.0f - (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f)) +
+       s5*(c5*(c4*((k*s4)/2.0f - (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f) -
+       s1*(s2*((k*s4)/2.0f - (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f))) +
+       s6*zf*(c1*(c5*(s2*((k*s4)/2.0f - (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f) +
+       s1*(c4*((k*s4)/2.0f - (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f)) +
+       s5*(c5*(c4*((k*s4)/2.0f - (c2*k*s3)/2.0f) - (c3*k*s2)/2.0f) -
+       s1*(s2*((k*s4)/2.0f - (c2*k*s3)/2.0f) + (c3*c4*k)/2.0f)));
+   float j32 = -tibia*(c4*c5*((c2*k)/2.0f + (k*s3*s4)/2.0f) -
+       s1*s2*((c2*k)/2.0f + (k*s3*s4)/2.0f)) - xf*(c1*(c4*s1*((c2*k)/2.0f +
+       (k*s3*s4)/2.0f) + c5*s2*((c2*k)/2.0f + (k*s3*s4)/2.0f)) +
+       s5*(c4*c5*((c2*k)/2.0f + (k*s3*s4)/2.0f) - s1*s2*((c2*k)/2.0f +
+       (k*s3*s4)/2.0f))) - yf*(s6*((k*s4)/2.0f - (c2*k*s3)/2.0f) -
+       c6*(c1*(c4*c5*((c2*k)/2.0f + (k*s3*s4)/2.0f) - s1*s2*((c2*k)/2.0f +
+       (k*s3*s4)/2.0f)) - s5*(c4*s1*((c2*k)/2.0f + (k*s3*s4)/2.0f) +
+       c5*s2*((c2*k)/2.0f + (k*s3*s4)/2.0f)))) - zf*(c6*((k*s4)/2.0f -
+       (c2*k*s3)/2.0f) + s6*(c1*(c4*c5*((c2*k)/2.0f + (k*s3*s4)/2.0f) -
+       s1*s2*((c2*k)/2.0f + (k*s3*s4)/2.0f)) - s5*(c4*s1*((c2*k)/2.0f +
+       (k*s3*s4)/2.0f) + c5*s2*((c2*k)/2.0f + (k*s3*s4)/2.0f)))) -
+       c4*thigh*((c2*k)/2.0f + (k*s3*s4)/2.0f);
+   float xbe = e.x;
+   float ybe = e.y;
+   float zbe = e.z;
+   float lambda = 0.4f;
+   float la2 = lambda*lambda;
+   float la4 = la2*la2;
+   float j322 = j32*j32;
+   float j222 = j22*j22;
+   float j122 = j12*j12;
+   float j212 = j21*j21;
+   float j112 = j11*j11;
+   float j312 = j31*j31;
+   float sigma = 1.0f/(la4 + j112*j222 + j122*j212 + j112*j322 + j122*j312 +
+   j212*j322 + j222*j312 + j112*la2 + j122*la2 + j212*la2 + j222*la2 +
+   j312*la2 + j322*la2 - 2.0f*j11*j12*j21*j22 - 2.0f*j11*j12*j31*j32 -
+   2.0f*j21*j22*j31*j32);
+   result.Hp = sigma*xbe*(j11*j222 + j11*j322 + j11*la2 - j12*j21*j22 -
+   j12*j31*j32) + sigma*ybe*(j122*j21 + j21*j322 + j21*la2 - j11*j12*j22 -
+   j22*j31*j32) + sigma*zbe*(j122*j31 + j222*j31 + j31*la2 - j11*j12*j32 -
+   j21*j22*j32);
+   result.Hr =  sigma*xbe*(j12*j212 + j12*j312 + j12*la2 - j11*j21*j22 -
+   j11*j31*j32) + sigma*ybe*(j112*j22 + j22*j312 + j22*la2 - j11*j12*j21 -
+   j21*j31*j32) + sigma*zbe*(j112*j32 + j212*j32 + j32*la2 - j11*j12*j31 -
+   j21*j22*j31);
+   return result;
+}
